@@ -1,0 +1,5 @@
+.load x64/Debug/sqlite-esent.dll
+
+CREATE VIRTUAL TABLE global USING esentvtab("F:\FileHistory\mwisn\MWSURFACE4\Configuration\Catalog1.edb", global);
+
+SELECT * FROM global;

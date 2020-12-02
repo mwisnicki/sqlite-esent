@@ -1,0 +1,11 @@
+.load x64/Debug/sqlite-esent.dll
+
+-- TODO opening 2 tables is broken at the moment
+
+CREATE VIRTUAL TABLE namespace USING esentvtab("F:\FileHistory\mwisn\MWSURFACE4\Configuration\Catalog1.edb", namespace);
+CREATE VIRTUAL TABLE string USING esentvtab("F:\FileHistory\mwisn\MWSURFACE4\Configuration\Catalog1.edb", string);
+
+SELECT id, datetime(wintime(fileCreated),'unixepoch'), string.string
+FROM namespace
+LEFT JOIN string ON parentId = string.id
+LIMIT 10;

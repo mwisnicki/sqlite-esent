@@ -1,0 +1,12 @@
+/.vs
+/x64/Debug
+/x64/Release
+/Debug
+/Release
+*.*proj.user
+
+edbtmp.log
+edbres00002.jrs
+edbres00001.jrs
+edb.log
+edb.chk
