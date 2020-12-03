@@ -9,11 +9,16 @@ SQLITE_EXTENSION_INIT1
 
 #include "sqlite3esent.h"
 
+static sqlite3_mutex* g_mutex;
+/* Shared global JET instance */
+static JET_INSTANCE jinstance = 0;
+/* Reference counter for jinstance */
+static int connections = 0;
+
 typedef struct EsentVtab EsentVtab;
 struct EsentVtab {
 	sqlite3_vtab base;
-	JET_INSTANCE jinstance; // probably should be stored at module level
-	JET_SESID jses; // same
+	JET_SESID jses; // TODO share the session for all vtab connections to the same file within single db connection
 	JET_DBID jdb; // same
 	char* tabName;
 	// TODO wrap into struct
@@ -124,9 +129,14 @@ static int esentVtabCreate(
 	// TODO should be global to module
 	// TODO reduce amount of eventlogs (or is this only in debug?)
 
-	jrc = JetCreateInstanceA(&pTab->jinstance, "Unique instance for esentVtab");
+	sqlite3_mutex_enter(g_mutex);
+
+	int needsinit = jinstance == 0;
+	if (needsinit)
+		jrc = JetCreateInstanceA(&jinstance, "Unique instance for esentVtab");
 	if (jrc != JET_errSuccess) {
-		pTab->jinstance = 0;
+		jinstance = 0;
+		sqlite3_mutex_leave(g_mutex);
 		jetErrorToSqlite(jrc, pzErr, "Failed to create JET instance: ");
 		rc = SQLITE_ERROR;
 		goto error;
@@ -136,16 +146,22 @@ static int esentVtabCreate(
 
 	// Jet init
 
-	jrc = JetInit3A(&pTab->jinstance, 0, 0);
+	// this is not supposed to modify jinstance so no need for mutex
+	if (needsinit)
+		jrc = JetInit3A(&jinstance, 0, 0);
 	if (jrc != JET_errSuccess) {
+		sqlite3_mutex_leave(g_mutex);
 		jetErrorToSqlite(jrc, pzErr, "Failed to initialize JET: ");
 		rc = SQLITE_ERROR;
 		goto error;
 	}
 
+	connections++;
+	sqlite3_mutex_leave(g_mutex);
+
 	// Jet session
 
-	jrc = JetBeginSessionA(pTab->jinstance, &pTab->jses, 0, 0);
+	jrc = JetBeginSessionA(jinstance, &pTab->jses, 0, 0);
 	if (jrc != JET_errSuccess) {
 		pTab->jses = 0;
 		jetErrorToSqlite(jrc, pzErr, "Failed to begin JET session: ");
@@ -157,6 +173,9 @@ static int esentVtabCreate(
 
 	int dbMaxSize = 1024 * 1024; // 1M * 4kb pages = 4GB
 	jrc = JetAttachDatabase2A(pTab->jses, edb_path, dbMaxSize, JET_bitDbReadOnly); // TODO for now read-only
+	// not sure how this happens with fresh session
+	if (jrc == JET_wrnDatabaseAttached)
+		jrc = JET_errSuccess;
 	if (jrc != JET_errSuccess) {
 		jetErrorToSqlite(jrc, pzErr, "Failed to attach JET database: ");
 		rc = SQLITE_ERROR;
@@ -255,7 +274,12 @@ static int esentVtabCreate(
 
 error:
 	if (rc != SQLITE_OK) {
-		if (pTab->jinstance != 0) JetTerm2(pTab->jinstance, 0);
+		sqlite3_mutex_enter(g_mutex);
+		if (jinstance != 0 && connections == 0) {
+			JetTerm2(jinstance, 0);
+			jinstance = 0;
+		}
+		sqlite3_mutex_leave(g_mutex);
 
 		if (pTab->tabName) {
 			free(pTab->tabName);
@@ -280,13 +304,21 @@ static int esentVtabConnect(
 	sqlite3_vtab** ppVtab,
 	char** pzErr
 ) {
+	// it doesn't seem to be ever called whereas xCreate is called twice
 	int rc = SQLITE_NOTFOUND;
 	return rc;
 }
 
 static int esentVtabDisconnect(sqlite3_vtab* pVtab) {
 	EsentVtab* p = (EsentVtab*)pVtab;
-	JetTerm2(p->jinstance, 0);
+
+	sqlite3_mutex_enter(g_mutex);
+	if (--connections == 0) {
+		JetTerm2(jinstance, 0);
+		jinstance = 0;
+	}
+	sqlite3_mutex_leave(g_mutex);
+
 	if (p->tabName) {
 		free(p->tabName);
 		p->tabName = 0;
@@ -296,7 +328,8 @@ static int esentVtabDisconnect(sqlite3_vtab* pVtab) {
 
 static int esentVtabDestroy(sqlite3_vtab* pVtab) {
 	EsentVtab* p = (EsentVtab*)pVtab;
-	JetTerm2(p->jinstance, 0);
+	// why is this never called
+
 	if (p->tabName) {
 		free(p->tabName);
 		p->tabName = 0;
@@ -338,7 +371,7 @@ error:
 static int esentVtabClose(sqlite3_vtab_cursor* pVtabCursor) {
 	EsentVtabCursor* pCur = (EsentVtabCursor*)pVtabCursor;
 	EsentVtab* pTab = (EsentVtab*)pVtabCursor->pVtab;
-	JetCloseTable(pTab->jinstance, pCur->jtab);
+	JetCloseTable(jinstance, pCur->jtab);
 	sqlite3_free(pVtabCursor);
 	return SQLITE_OK;
 }
@@ -491,6 +524,9 @@ int sqlite3_extension_init(
 	SQLITE_EXTENSION_INIT2(pApi);
 	(void)pzErrMsg;  /* Suppress harmless warning */
 	fprintf(stderr, "Loaded esent\n");
+
+	g_mutex = sqlite3_mutex_alloc(SQLITE_MUTEX_FAST);
+
 	rc = createEsentModule(db);
 
 	return rc;

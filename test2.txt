@@ -5,7 +5,9 @@
 CREATE VIRTUAL TABLE namespace USING esentvtab("F:\FileHistory\mwisn\MWSURFACE4\Configuration\Catalog1.edb", namespace);
 CREATE VIRTUAL TABLE string USING esentvtab("F:\FileHistory\mwisn\MWSURFACE4\Configuration\Catalog1.edb", string);
 
-SELECT id, datetime(wintime(fileCreated),'unixepoch'), string.string
+-- seems extremely slow per each item without index, looks like it doesn't do in memory hash join
+
+SELECT namespace.id, datetime(wintime(fileCreated),'unixepoch'), string.string
 FROM namespace
 LEFT JOIN string ON parentId = string.id
 LIMIT 10;
